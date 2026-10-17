@@ -1,0 +1,139 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+  admin_api_key: lg_admin_local_dev
+  expose_diagnostics: true
+  audit_log_path: var/audit/decisions.jsonl
+  max_body_chars: 32000
+  reservation_output_tokens: 256
+  log_level: INFO
+
+cache:
+  backend: memory
+  redis_url: redis://redis:6379/0
+  ttl_seconds: 300
+  similarity_threshold: 0.86
+  max_entries: 200
+  embed_dim: 128
+
+retry:
+  attempts: 2
+  base_delay_seconds: 0.01
+  max_delay_seconds: 0.05
+
+circuit_breaker:
+  failure_threshold: 3
+  recovery_seconds: 15
+
+providers:
+  openai:
+    api_key_env: OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    base_url: https://api.anthropic.com
+
+models:
+  fake-quality:
+    provider: fake
+    upstream_model: fake-quality
+    behavior: faithful
+    timeout_seconds: 5
+    input_per_million_usd: 5.0
+    output_per_million_usd: 15.0
+  fake-balanced:
+    provider: fake
+    upstream_model: fake-balanced
+    behavior: faithful
+    timeout_seconds: 5
+    input_per_million_usd: 1.0
+    output_per_million_usd: 3.0
+  fake-fast:
+    provider: fake
+    upstream_model: fake-fast
+    behavior: faithful
+    timeout_seconds: 2
+    input_per_million_usd: 0.15
+    output_per_million_usd: 0.60
+  fake-echo:
+    provider: fake
+    upstream_model: fake-echo
+    behavior: echo
+    timeout_seconds: 2
+    input_per_million_usd: 0.15
+    output_per_million_usd: 0.60
+  fake-json:
+    provider: fake
+    upstream_model: fake-json
+    behavior: json
+    timeout_seconds: 2
+    input_per_million_usd: 0.15
+    output_per_million_usd: 0.60
+  fake-ungrounded:
+    provider: fake
+    upstream_model: fake-ungrounded
+    behavior: ungrounded
+    timeout_seconds: 2
+    input_per_million_usd: 0.15
+    output_per_million_usd: 0.60
+  fake-unstable:
+    provider: fake
+    upstream_model: fake-unstable
+    behavior: fail
+    timeout_seconds: 2
+    input_per_million_usd: 5.0
+    output_per_million_usd: 15.0
+  gpt-4o-mini:
+    provider: openai
+    upstream_model: gpt-4o-mini
+    timeout_seconds: 30
+    input_per_million_usd: 0.15
+    output_per_million_usd: 0.60
+  claude-3-5-haiku:
+    provider: anthropic
+    upstream_model: claude-3-5-haiku-latest
+    timeout_seconds: 30
+    input_per_million_usd: 0.80
+    output_per_million_usd: 4.00
+
+routes:
+  quality: [fake-quality, fake-balanced, fake-fast]
+  latency: [fake-fast, fake-balanced]
+  cost: [fake-fast, fake-balanced]
+  unstable-demo: [fake-unstable, fake-fast]
+
+guardrails:
+  injection:
+    enabled: true
+    threshold: 0.50
+    model_path: data/models/injection_classifier.json
+  pii:
+    enabled: true
+    mode: redact
+    reversible_types: [email]
+  grounding:
+    enabled: true
+    min_score: 0.45
+  schema_validation:
+    enabled: true
+  stream_mode: buffered
+
+tenants:
+  - id: regulated-demo
+    policy_pack: regulated
+    daily_budget_usd: 25
+    requests_per_minute: 600
+    burst: 60
+    stream_mode: buffered
+    api_keys:
+      - name: local
+        sha256: c7609828973195b5cc9c5087c332f46f09194688d141358b9cf6e65bebf5ef63
+  - id: latency-demo
+    policy_pack: regulated
+    daily_budget_usd: 50
+    requests_per_minute: 1200
+    burst: 120
+    stream_mode: incremental
+    api_keys:
+      - name: local
+        sha256: a2def92924bdb39f3ccb3cf10b4c374418f9cdd5edb603b1a0963247c1cc0428
