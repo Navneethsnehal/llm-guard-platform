@@ -1,0 +1,18 @@
+id: regulated
+deny_topics:
+  - id: weapons
+    action: block
+    patterns:
+      - '(?i)\bhow to (build|make|assemble|construct)\b.{0,40}\b(bomb|explosive|grenade|firearm|gun|weapon)\b'
+      - '(?i)\b(synthesize|manufacture)\b.{0,30}\b(explosive|bomb)\b'
+  - id: insider_trading
+    action: block
+    patterns:
+      - '(?i)\b(buy|sell|trade)\b.{0,50}\bbefore (the )?(announcement|earnings|merger)\b'
+      - '(?i)\b(buy|sell|tip)\b.{0,60}\bmaterial non-?public\b'
+      - '(?i)\bgive me (a )?(stock )?tip\b'
+  - id: crime_assistance
+    action: block
+    patterns:
+      - '(?i)\b(steal|skim|phish)\b.{0,40}\b(card|account|funds|credentials)\b'
+      - '(?i)\bhow to (commit|pull off)\b.{0,20}\b(fraud|theft)\b'
