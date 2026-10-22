@@ -1,6 +1,6 @@
 """Shared value types for the gateway, providers, and guardrails."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -106,14 +106,3 @@ def usage_for(messages: tuple[Message, ...] | list[Message], completion: str) ->
     prompt = estimate_tokens(render_messages(messages))
     completion_tokens = estimate_tokens(completion)
     return Usage(prompt_tokens=prompt, completion_tokens=completion_tokens)
-
-
-@dataclass(slots=True)
-class MutableTraces:
-    items: list[GuardTrace] = field(default_factory=list)
-
-    def add(self, trace: GuardTrace) -> None:
-        self.items.append(trace)
-
-    def frozen(self) -> tuple[GuardTrace, ...]:
-        return tuple(self.items)

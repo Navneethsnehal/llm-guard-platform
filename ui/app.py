@@ -8,7 +8,15 @@ from typing import Any
 import httpx
 import streamlit as st
 
-from llm_guard.dashboard import block_counts, category_rows, circuit_rows, gate_rows, headline, request_rows
+from llm_guard.dashboard import (
+    block_counts,
+    cache_rows,
+    category_rows,
+    circuit_rows,
+    gate_rows,
+    headline,
+    request_rows,
+)
 
 GATEWAY_URL = os.environ.get("LLM_GUARD_URL", "http://127.0.0.1:8080")
 ADMIN_KEY = os.environ.get("LLM_GUARD_ADMIN_KEY", "lg_admin_local_dev")
@@ -66,11 +74,7 @@ with left:
     st.subheader("Requests")
     st.dataframe(request_rows(snapshot), hide_index=True)
     st.subheader("Cache")
-    cache = snapshot.get("cache")
-    cache_rows = []
-    if isinstance(cache, dict):
-        cache_rows = [{"result": key, "count": value} for key, value in cache.items()]
-    st.dataframe(cache_rows, hide_index=True)
+    st.dataframe(cache_rows(snapshot), hide_index=True)
 with right:
     st.subheader("Circuits")
     st.dataframe(circuit_rows(snapshot), hide_index=True)

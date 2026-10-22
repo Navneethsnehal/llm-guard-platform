@@ -20,7 +20,7 @@ def micro_to_usd(amount: int) -> float:
 
 
 def usage_cost_micro(usage: Usage, *, input_per_million: float, output_per_million: float) -> int:
-    """Exact integer cost: tokens * USD-per-million == micro-USD."""
+    """Round token counts times USD-per-million into integer micro-USD."""
 
     input_cost = round(usage.prompt_tokens * input_per_million)
     output_cost = round(usage.completion_tokens * output_per_million)

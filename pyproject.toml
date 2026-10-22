@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "llm-guard-platform"
 version = "0.1.0"
-description = "Production LLM gateway with routing, guardrails, red-teaming, eval-gated releases, and observability."
+description = "LLM gateway with routing, guardrails, red-teaming, eval-gated releases, and observability."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

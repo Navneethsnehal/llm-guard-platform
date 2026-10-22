@@ -96,7 +96,7 @@ def headline(snapshot: dict[str, Any], redteam: dict[str, Any] | None, gate: dic
     if isinstance(requests, dict):
         for status, count in requests.items():
             total += int(count)
-            if status in {"guardrail_blocked", "content_filter"}:
+            if status == "guardrail_blocked":
                 blocked += int(count)
     return {
         "requests": total,
