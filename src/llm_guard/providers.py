@@ -171,6 +171,7 @@ class OpenAIProvider(ChatProvider):
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         async for event in self._stream_sse("/chat/completions", payload, timeout):
             yield event
@@ -367,6 +368,29 @@ def _parse_anthropic_completion(body: dict[str, object]) -> tuple[str, int, int]
     return "".join(parts), prompt_tokens, completion_tokens
 
 
+def _optional_usage(value: object) -> Usage | None:
+    if value is None:
+        return None
+    prompt_tokens, completion_tokens = _usage(value, "prompt_tokens", "completion_tokens")
+    return Usage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+
+
+def _delta_text(choices: object) -> str:
+    parsed_choices = _as_list(choices)
+    if not parsed_choices:
+        return ""
+    choice = _as_dict(parsed_choices[0])
+    if choice is None:
+        return ""
+    delta = _as_dict(choice.get("delta"))
+    if delta is None:
+        return ""
+    content = delta.get("content")
+    if not isinstance(content, str):
+        return ""
+    return content
+
+
 def _usage(value: object, prompt_key: str, completion_key: str) -> tuple[int, int]:
     parsed = _as_dict(value) or {}
     prompt = parsed.get(prompt_key, 0)
@@ -407,16 +431,8 @@ def _openai_delta(line: str) -> ProviderEvent | None:
     parsed = _as_dict(parsed_json)
     if parsed is None:
         return None
-    choices = _as_list(parsed.get("choices"))
-    if not choices:
+    usage = _optional_usage(parsed.get("usage"))
+    content = _delta_text(parsed.get("choices"))
+    if content == "" and usage is None:
         return None
-    choice = _as_dict(choices[0])
-    if choice is None:
-        return None
-    delta = _as_dict(choice.get("delta"))
-    if delta is None:
-        return None
-    content = delta.get("content")
-    if not isinstance(content, str) or content == "":
-        return None
-    return ProviderEvent(text=content)
+    return ProviderEvent(text=content, usage=usage)
