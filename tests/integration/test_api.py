@@ -62,6 +62,32 @@ async def test_health_models_and_completion(client: tuple[httpx.AsyncClient, obj
     assert bypass.headers["x-llm-guard-cache"] == "bypass"
 
 
+async def test_cache_does_not_reuse_another_callers_pii(client: tuple[httpx.AsyncClient, object]) -> None:
+    """Redaction makes different emails look identical. The cache must not.
+
+    A hit would return the first caller's restored address to the second caller.
+    """
+
+    http, _app = client
+    shared = "The platinum card APR is 2.9 percent for the first twelve months."
+    alice = f"{shared} Email alice@bank.example about that platinum card APR."
+    bob = f"{shared} Email bob@bank.example about that platinum card APR."
+    first = await http.post("/v1/chat/completions", headers=auth(REGULATED_KEY), json=_body(alice, model="fake-echo"))
+    assert first.status_code == 200
+    assert first.headers["x-llm-guard-cache"] == "miss"
+    assert "alice@bank.example" in first.text
+    second = await http.post("/v1/chat/completions", headers=auth(REGULATED_KEY), json=_body(bob, model="fake-echo"))
+    assert second.status_code == 200
+    assert second.headers["x-llm-guard-cache"] == "miss"
+    assert "bob@bank.example" in second.text
+    assert "alice@bank.example" not in second.text
+    replay = await http.post("/v1/chat/completions", headers=auth(REGULATED_KEY), json=_body(alice, model="fake-echo"))
+    assert replay.status_code == 200
+    assert replay.headers["x-llm-guard-cache"] == "hit"
+    assert "alice@bank.example" in replay.text
+    assert "bob@bank.example" not in replay.text
+
+
 async def test_streaming_buffered_and_incremental(client: tuple[httpx.AsyncClient, object]) -> None:
     http, _app = client
     buffered = await http.post(

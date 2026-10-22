@@ -67,6 +67,7 @@ class _Prepared:
     blocked_stage: str | None
     blocked_reasons: tuple[str, ...]
     input_decision: str
+    pii_fingerprint: str = ""
     committed: bool = False
     model_name: str = ""
     cache_result: str = "bypass"
@@ -204,6 +205,7 @@ class Gateway:
             blocked_stage=outcome.stage,
             blocked_reasons=outcome.reasons,
             input_decision=outcome.decision,
+            pii_fingerprint=vault.fingerprint(),
             model_name=request.model,
         )
 
@@ -213,7 +215,7 @@ class Gateway:
             return None
         with self._span("cache.lookup"):
             hit = await self.cache.lookup(
-                _namespace(prepared.tenant.id, prepared.request.model),
+                _cache_namespace(prepared),
                 render_messages(prepared.messages),
             )
         if hit is None:
@@ -260,7 +262,7 @@ class Gateway:
         )
         if prepared.cache_result == "miss":
             await self.cache.store(
-                _namespace(prepared.tenant.id, prepared.request.model),
+                _cache_namespace(prepared),
                 render_messages(prepared.messages),
                 response_text=outcome.text,
                 model=spec.name,
@@ -541,8 +543,18 @@ def _cacheable(request: CompletionRequest) -> bool:
     return request.use_cache and request.temperature == 0.0 and not request.stream
 
 
-def _namespace(tenant_id: str, model: str) -> str:
-    return f"{tenant_id}:{model}"
+def _cache_namespace(prepared: _Prepared) -> str:
+    """Tenant, requested model, and the input PII values.
+
+    Redaction maps different emails onto the same placeholder. Without the
+    fingerprint, those prompts share a hit and the cached completion can
+    contain the other caller's restored value.
+    """
+
+    base = f"{prepared.tenant.id}:{prepared.request.model}"
+    if not prepared.pii_fingerprint:
+        return base
+    return f"{base}:{prepared.pii_fingerprint}"
 
 
 def _merge_decision(input_decision: str, output_decision: str) -> str:

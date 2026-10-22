@@ -1,5 +1,6 @@
 """PII detection with optional reversible tokenization."""
 
+import hashlib
 import re
 from dataclasses import dataclass
 
@@ -40,6 +41,18 @@ class PiiVault:
         token = f"[[PII:{kind}:{self._counts[kind]}]]"
         self._values[token] = (kind, value)
         return token
+
+    def fingerprint(self) -> str:
+        """Stable id for the values replaced in this request.
+
+        Token text is not enough to tell two redacted prompts apart: the first
+        email is always ``[[PII:email:1]]``.
+        """
+
+        if not self._values:
+            return ""
+        material = "\n".join(f"{token}\0{kind}\0{value}" for token, (kind, value) in self._values.items())
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def render(self, text: str, reversible: set[str]) -> str:
         def replace(match: re.Match[str]) -> str:

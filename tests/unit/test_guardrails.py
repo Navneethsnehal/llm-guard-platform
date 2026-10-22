@@ -64,6 +64,15 @@ def test_luhn_and_pii_detection() -> None:
     assert vault.render("[[PII:email:99]]", {"email"}) == "[[PII:email:99]]"
     assert redact("nothing here", PiiVault()) == ("nothing here", ())
     assert found
+    assert PiiVault().fingerprint() == ""
+    left = PiiVault()
+    left.put("email", "alice@bank.example")
+    right = PiiVault()
+    right.put("email", "alice@bank.example")
+    other = PiiVault()
+    other.put("email", "bob@bank.example")
+    assert left.fingerprint() == right.fingerprint()
+    assert left.fingerprint() != other.fingerprint()
 
 
 @given(local=st.from_regex(r"[a-z][a-z0-9]{0,8}", fullmatch=True))
