@@ -1,5 +1,6 @@
 """Request orchestration: limits, guardrails, cache, routing, and accounting."""
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -298,16 +299,19 @@ class Gateway:
             except GatewayError as exc:
                 status = exc.code
                 raise
+            except (GeneratorExit, asyncio.CancelledError):
+                status = "cancelled"
+                raise
             finally:
                 self._finish(prepared, request, status, tenant)
 
         return headers, body()
 
     async def _incremental_lines(self, prepared: _Prepared, start: StreamStart) -> AsyncIterator[str]:
-        settled = False
         completion_id = _new_id("chatcmpl")
         created = int(self._clock())
         model = start.spec.name
+        failed = False
         try:
             yield sse(
                 completion_chunk(
@@ -332,8 +336,6 @@ class Gateway:
                     prepared.blocked_reasons = scan.reasons
                     self._record_stage(prepared, scan.traces)
                     self._charge(prepared, start.spec, usage or usage_for(prepared.messages, accumulated))
-                    settled = True
-                    start.succeed()
                     yield sse(
                         completion_chunk(
                             completion_id=completion_id,
@@ -358,8 +360,6 @@ class Gateway:
             self._note_grounding(prepared, accumulated)
             final_usage = usage or usage_for(prepared.messages, accumulated)
             self._charge(prepared, start.spec, final_usage)
-            settled = True
-            start.succeed()
             include = prepared.request.include_usage
             yield sse(
                 completion_chunk(
@@ -372,9 +372,15 @@ class Gateway:
                 )
             )
             yield sse_done()
+        except Exception:
+            failed = True
+            raise
         finally:
-            if not settled:
+            if failed:
                 start.fail()
+            else:
+                start.succeed()
+            await _aclose(start.rest)
 
     def _note_grounding(self, prepared: _Prepared, text: str) -> None:
         if not self.settings.guardrails.grounding.enabled:
@@ -575,6 +581,16 @@ def _grounding_decision(score: float, reasons: tuple[str, ...], minimum: float) 
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:24]}"
+
+
+async def _aclose(iterator: AsyncIterator[object]) -> None:
+    close = getattr(iterator, "aclose", None)
+    if close is None:
+        return
+    try:
+        await close()
+    except RuntimeError:
+        return
 
 
 async def _chain(first: ProviderEvent, rest: AsyncIterator[ProviderEvent]) -> AsyncIterator[ProviderEvent]:
