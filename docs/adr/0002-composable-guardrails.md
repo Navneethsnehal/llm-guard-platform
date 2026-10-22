@@ -16,4 +16,4 @@ Topic rules are YAML per policy pack. Tenants point at a pack. System text is no
 
 ## Consequences
 
-A new control is a stage with a trace, not a branch in the router. Stages do not see each other's private state except the per-request PII vault. Grounding is lexical. It will not catch a fluent paraphrase that shares no content words with the context, and it will abstain cleanly when the model says it does not know.
+A new control is a stage with a trace, not a branch in the router. Stages do not see each other's private state except the per-request PII vault. Grounding is lexical. It will not catch a fluent paraphrase that shares no content words with the context. A sentence that only declines to answer is not a claim. Other sentences in the same answer are still scored.

@@ -49,7 +49,7 @@ sequenceDiagram
     alt blocked
         I-->>C: 400 content_filter
     else allowed
-        G->>K: Lookup tenant and model namespace
+        G->>K: Lookup tenant, model, and input-PII namespace
         alt cache hit and temperature is 0
             K-->>C: Cached completion, cost 0
         else miss

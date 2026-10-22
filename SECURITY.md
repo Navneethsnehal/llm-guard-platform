@@ -22,7 +22,7 @@ Set `LLM_GUARD_ADMIN_KEY` in any shared environment. Do not reuse the demo admin
 - Do not expose `/metrics` or the admin routes on a public ingress. `/metrics` has no credential because scrapers on a private network should not need the admin key, and it does not contain prompts.
 - Provider keys are read from the environment named in the config (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`). They are not written to logs.
 - The audit log records the SHA-256 of the rendered prompt, the stage, the decision, and reason codes. It does not record the prompt or the completion. Treat the file as compliance evidence and restrict its filesystem permissions.
-- The semantic cache stores completion text. Use the Redis backend with network policy that matches the sensitivity of those completions, or keep the memory backend on a single host.
+- The semantic cache stores completion text. Use the Redis backend with network policy that matches the sensitivity of those completions, or keep the memory backend on a single host. The namespace is the tenant, the requested model, and, when input PII was replaced, a SHA-256 of those replacements. A restored email can still sit in the cached completion, so two prompts that redact to the same text do not share an entry.
 - The injection classifier and the red-team pack are regression controls. A green CI run means this suite was blocked, not that every future prompt will be.
 
 ## Threat model

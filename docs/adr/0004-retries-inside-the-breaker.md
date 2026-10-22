@@ -10,9 +10,9 @@ A single 429 should not open a breaker, and a breaker that opens on the first fa
 
 ## Decision
 
-`call_with_retry` is the unit the breaker observes. Retryable provider errors sleep with full jitter (`uniform(0, min(cap, base * 2^attempt))`) and try again up to `attempts`. A non-retryable error, or the last attempt, is one failure. The next candidate is used only after that. Half-open allows a single trial after `recovery_seconds`.
+`call_with_retry` is the unit the breaker observes. Retryable provider errors sleep with full jitter (`uniform(0, min(cap, base * 2^attempt))`) and try again up to `attempts`. A non-retryable error, or the last attempt, is one failure. The next candidate is used only after that. Half-open allows a single trial after `recovery_seconds`. An exception that is not a `ProviderError`, after `allow()`, is also one failure, so a half-open trial cannot stay in flight.
 
-Streaming may fall back only before the first event. Once a byte is available, the selected model's breaker is settled when the generator finishes.
+Streaming may fall back only before the first event. An empty stream is a retryable provider error, not a success. Once an event is available, the selected model's breaker is settled when the generator finishes. A client disconnect after that event records success. A provider exception while reading the rest records failure.
 
 ## Consequences
 
