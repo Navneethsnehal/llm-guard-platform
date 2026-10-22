@@ -196,12 +196,7 @@ class ModelRouter:
                 errors.append(f"{spec.name}: circuit open")
                 continue
             provider = self.providers[spec.name]
-            upstream = ProviderRequest(
-                model=spec.upstream_model,
-                messages=request.messages,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-            )
+            upstream = _upstream_request(spec, request)
 
             async def attempt(
                 provider: ChatProvider = provider,
@@ -210,19 +205,26 @@ class ModelRouter:
             ) -> ProviderResponse:
                 return await _invoke_provider(provider, upstream, spec.timeout_s)
 
+            settled = False
             try:
-                response = await call_with_retry(
-                    attempt,
-                    self.retry,
-                    sleep=self._sleeper,
-                    rng=self._rng,
-                )
-            except ProviderError as exc:
-                breaker.record_failure()
-                errors.append(f"{spec.name}: {exc.message}")
-                continue
-            breaker.record_success()
-            return spec, response
+                try:
+                    response = await call_with_retry(
+                        attempt,
+                        self.retry,
+                        sleep=self._sleeper,
+                        rng=self._rng,
+                    )
+                except ProviderError as exc:
+                    breaker.record_failure()
+                    settled = True
+                    errors.append(f"{spec.name}: {exc.message}")
+                    continue
+                breaker.record_success()
+                settled = True
+                return spec, response
+            finally:
+                if not settled:
+                    breaker.record_failure()
         detail = "; ".join(errors) if errors else "no candidates"
         raise UpstreamError(f"No upstream model available ({detail})")
 
@@ -230,7 +232,8 @@ class ModelRouter:
         """Return the first upstream that yields an event.
 
         Fallback happens only before the first event. The caller records the
-        breaker outcome when the stream finishes.
+        breaker outcome when the stream finishes. An exception after ``allow``
+        still settles the breaker, so a half-open trial cannot stick.
         """
 
         errors: list[str] = []
@@ -240,36 +243,34 @@ class ModelRouter:
                 errors.append(f"{spec.name}: circuit open")
                 continue
             provider = self.providers[spec.name]
-            upstream = ProviderRequest(
-                model=spec.upstream_model,
-                messages=request.messages,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-            )
+            upstream = _upstream_request(spec, request)
 
             async def open_first(
                 provider: ChatProvider = provider,
                 spec: ModelSpec = spec,
                 upstream: ProviderRequest = upstream,
-            ) -> tuple[ProviderEvent, AsyncIterator[ProviderEvent]] | None:
+            ) -> tuple[ProviderEvent, AsyncIterator[ProviderEvent]]:
                 return await _open_first_event(provider, upstream, spec.timeout_s)
 
+            settled = False
             try:
-                opened = await call_with_retry(
-                    open_first,
-                    self.retry,
-                    sleep=self._sleeper,
-                    rng=self._rng,
-                )
-            except ProviderError as exc:
-                breaker.record_failure()
-                errors.append(f"{spec.name}: {exc.message}")
-                continue
-            if opened is None:
-                breaker.record_success()
-                raise UpstreamError(f"{spec.name} returned an empty stream")
-            first, rest = opened
-            return StreamStart(spec=spec, first=first, rest=rest, breaker=breaker)
+                try:
+                    first, rest = await call_with_retry(
+                        open_first,
+                        self.retry,
+                        sleep=self._sleeper,
+                        rng=self._rng,
+                    )
+                except ProviderError as exc:
+                    breaker.record_failure()
+                    settled = True
+                    errors.append(f"{spec.name}: {exc.message}")
+                    continue
+                settled = True
+                return StreamStart(spec=spec, first=first, rest=rest, breaker=breaker)
+            finally:
+                if not settled:
+                    breaker.record_failure()
         detail = "; ".join(errors) if errors else "no candidates"
         raise UpstreamError(f"No upstream model available ({detail})")
 
@@ -288,18 +289,42 @@ class StreamStart:
         self.breaker.record_failure()
 
 
+def _upstream_request(spec: ModelSpec, request: ProviderRequest) -> ProviderRequest:
+    return ProviderRequest(
+        model=spec.upstream_model,
+        messages=request.messages,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+    )
+
+
+async def _aclose(iterator: AsyncIterator[object]) -> None:
+    close = getattr(iterator, "aclose", None)
+    if close is None:
+        return
+    try:
+        await close()
+    except RuntimeError:
+        return
+
+
 async def _open_first_event(
     provider: ChatProvider,
     request: ProviderRequest,
     timeout_s: float,
-) -> tuple["ProviderEvent", AsyncIterator["ProviderEvent"]] | None:
+) -> tuple["ProviderEvent", AsyncIterator["ProviderEvent"]]:
     iterator = provider.stream(request, timeout=timeout_s)
     try:
         first = await asyncio.wait_for(iterator.__anext__(), timeout=timeout_s)
-    except StopAsyncIteration:
-        return None
+    except StopAsyncIteration as exc:
+        await _aclose(iterator)
+        raise ProviderError("provider returned an empty stream", retryable=True) from exc
     except TimeoutError as exc:
+        await _aclose(iterator)
         raise ProviderError(f"provider timed out after {timeout_s:.3f}s", retryable=True) from exc
+    except Exception:
+        await _aclose(iterator)
+        raise
     return first, iterator
 
 
