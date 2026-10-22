@@ -14,7 +14,9 @@ import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeVar
+
+_T = TypeVar("_T")
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 
@@ -110,7 +112,7 @@ class MemoryStore:
             expires_at = now + ttl_s
             current = [item for item in self._items.get(namespace, []) if item[1] > now]
             current.append((entry_json, expires_at))
-            self._items[namespace] = current[-max_entries:]
+            self._items[namespace] = _trim(current, max_entries)
 
 
 class KeyValueClient(Protocol):
@@ -124,19 +126,17 @@ class RedisStore:
 
     Adequate for a few hundred near-duplicate entries per tenant and model.
     A vector index is the upgrade when cardinality outgrows a single key.
+    The lock covers one process. Two processes can still lose an update.
     """
 
-    def __init__(self, client: KeyValueClient) -> None:
+    def __init__(self, client: KeyValueClient, clock: Callable[[], float] | None = None) -> None:
         self._client = client
+        self._clock = clock or time.time
+        self._lock = asyncio.Lock()
 
     async def get_all(self, namespace: str) -> list[str]:
         raw = await self._client.get(_redis_key(namespace))
-        if not raw:
-            return []
-        parsed = json.loads(raw)
-        if not isinstance(parsed, list):
-            return []
-        return [item for item in parsed if isinstance(item, str)]
+        return _decode_entries(raw)
 
     async def put(
         self,
@@ -146,18 +146,57 @@ class RedisStore:
         ttl_s: float,
         max_entries: int,
     ) -> None:
-        current = await self.get_all(namespace)
-        current.append(entry_json)
-        trimmed = current[-max_entries:]
-        await self._client.set(
-            _redis_key(namespace),
-            json.dumps(trimmed, separators=(",", ":")),
-            ex=max(1, int(ttl_s)),
-        )
+        async with self._lock:
+            now = self._clock()
+            raw = await self._client.get(_redis_key(namespace))
+            current = [item for item in _decode_entries(raw) if _entry_is_live(item, now)]
+            current.append(entry_json)
+            trimmed = _trim(current, max_entries)
+            await self._client.set(
+                _redis_key(namespace),
+                json.dumps(trimmed, separators=(",", ":")),
+                ex=max(1, int(ttl_s)),
+            )
 
 
 def _redis_key(namespace: str) -> str:
     return f"llm-guard:semcache:{namespace}"
+
+
+def _trim(entries: list[_T], max_entries: int) -> list[_T]:
+    """Keep the newest entries.
+
+    ``seq[-0:]`` is the whole sequence, so a non-positive cap cannot be a slice.
+    """
+
+    if max_entries <= 0:
+        return []
+    return entries[-max_entries:]
+
+
+def _decode_entries(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, str)]
+
+
+def _entry_is_live(raw: str, now: float) -> bool:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    expires_at = parsed.get("expires_at")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+        return False
+    return float(expires_at) > now
 
 
 class AsyncRedisAdapter:
