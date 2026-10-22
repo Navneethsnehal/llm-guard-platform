@@ -105,6 +105,40 @@ async def test_memory_and_redis_cache() -> None:
     assert await redis_cache.lookup("ns", "alpha beta") is None
 
 
+async def test_cache_cap_of_zero_stores_nothing() -> None:
+    memory = MemoryStore()
+    cache = SemanticCache(memory, Embedder(8), threshold=0.5, ttl_s=10, max_entries=0)
+    await cache.store(
+        "ns", "hello world", response_text="yes", model="m", prompt_tokens=1, completion_tokens=1, decision="allow"
+    )
+    assert await memory.get_all("ns") == []
+    client = MemoryRedis()
+    await RedisStore(client).put("ns", '{"expires_at": 1}', ttl_s=5, max_entries=0)
+    assert await RedisStore(client).get_all("ns") == []
+
+
+async def test_redis_drops_expired_entries_and_bad_json() -> None:
+    clock = Clock(100)
+    client = MemoryRedis()
+    store = RedisStore(client, clock=clock)
+    cache = SemanticCache(store, Embedder(16), threshold=0.99, ttl_s=5, max_entries=2, clock=clock)
+    await cache.store(
+        "ns", "alpha one", response_text="A", model="m", prompt_tokens=1, completion_tokens=1, decision="allow"
+    )
+    await cache.store(
+        "ns", "beta two", response_text="B", model="m", prompt_tokens=1, completion_tokens=1, decision="allow"
+    )
+    clock.now = 110
+    await cache.store(
+        "ns", "gamma three", response_text="C", model="m", prompt_tokens=1, completion_tokens=1, decision="allow"
+    )
+    texts = [json.loads(item)["text"] for item in await store.get_all("ns")]
+    assert texts == ["C"]
+    client.values["llm-guard:semcache:broken"] = "{"
+    assert await store.get_all("broken") == []
+    assert await cache.lookup("broken", "gamma three") is None
+
+
 def test_circuit_breaker_and_retry() -> None:
     clock = Clock()
     breaker = CircuitBreaker(failure_threshold=2, recovery_s=5, clock=clock)
@@ -211,6 +245,119 @@ async def test_router_fallback_timeout_and_empty_stream() -> None:
     assert any(event.text for event in chunks)
 
 
+class _CountingBreaker(CircuitBreaker):
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.failure_records = 0
+        self.success_records = 0
+
+    def record_failure(self) -> None:
+        self.failure_records += 1
+        super().record_failure()
+
+    def record_success(self) -> None:
+        self.success_records += 1
+        super().record_success()
+
+
+class _Boom(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__("boom")
+
+    async def complete(self, request: ProviderRequest, *, timeout: float) -> object:
+        del request, timeout
+        raise RuntimeError("boom")
+
+
+class _Calls(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__("empty")
+        self.calls = 0
+
+    async def stream(self, request: ProviderRequest, *, timeout: float):
+        del request, timeout
+        self.calls += 1
+        if False:
+            yield ProviderEvent()
+
+
+async def test_empty_stream_falls_back_and_counts_as_one_failure() -> None:
+    empty = _Calls()
+    breaker = _CountingBreaker(failure_threshold=1, recovery_s=30)
+    fast = _spec("fast")
+    router = ModelRouter(
+        {"empty": _spec("empty"), "fast": fast},
+        {"blank": ["empty", "fast"]},
+        {"empty": empty, "fast": FakeProvider("fast")},
+        {"empty": breaker, "fast": CircuitBreaker(failure_threshold=1, recovery_s=30)},
+        RetryPolicy(2, 0.0, 0.0),
+        sleeper=_no_sleep,
+        rng=lambda: 0.0,
+    )
+    opened = await router.open_stream("blank", _request())
+    assert opened.spec.name == "fast"
+    assert empty.calls == 2
+    assert breaker.failure_records == 1
+    assert breaker.state == "open"
+    opened.succeed()
+
+
+async def test_stream_timeout_falls_back() -> None:
+    router = ModelRouter(
+        {"slow": _spec("slow", timeout=0.01, latency=1.0), "fast": _spec("fast")},
+        {"tier": ["slow", "fast"]},
+        {"slow": FakeProvider("slow", latency_s=1.0), "fast": FakeProvider("fast")},
+        {name: CircuitBreaker(failure_threshold=2, recovery_s=30) for name in ("slow", "fast")},
+        RetryPolicy(1, 0.0, 0.0),
+        sleeper=_no_sleep,
+        rng=lambda: 0.0,
+    )
+    opened = await router.open_stream("tier", _request())
+    assert opened.spec.name == "fast"
+    opened.succeed()
+
+
+async def test_unexpected_error_does_not_stick_half_open() -> None:
+    clock = Clock()
+    breaker = CircuitBreaker(failure_threshold=1, recovery_s=5, clock=clock)
+    router = ModelRouter(
+        {"only": _spec("only")},
+        {},
+        {"only": _Boom()},
+        {"only": breaker},
+        RetryPolicy(1, 0.0, 0.0),
+        sleeper=_no_sleep,
+        rng=lambda: 0.0,
+    )
+    with pytest.raises(RuntimeError):
+        await router.invoke("only", _request())
+    assert breaker.state == "open"
+    clock.now = 5
+    with pytest.raises(RuntimeError):
+        await router.invoke("only", _request())
+    clock.now = 10
+    assert breaker.allow() is True
+
+
+async def test_retries_are_one_breaker_outcome() -> None:
+    breaker = _CountingBreaker(failure_threshold=2, recovery_s=30)
+    router = ModelRouter(
+        {"flaky": _spec("flaky", fail=2)},
+        {},
+        {"flaky": FakeProvider("flaky", fail_times=2)},
+        {"flaky": breaker},
+        RetryPolicy(3, 0.0, 0.0),
+        sleeper=_no_sleep,
+        rng=lambda: 0.0,
+    )
+    spec, response = await router.invoke("flaky", _request())
+    assert spec.name == "flaky"
+    assert response.text
+    assert breaker.failure_records == 0
+    assert breaker.success_records == 1
+    assert breaker.state == "closed"
+
+
 class _EmptyProvider(FakeProvider):
     def __init__(self) -> None:
         super().__init__("empty")
@@ -290,6 +437,40 @@ async def test_openai_and_anthropic_clients() -> None:
         assert completed.text == "Hello"
         streamed = [event async for event in anthropic.stream(request, timeout=1)]
         assert streamed[0].text == "Hello"
+
+
+async def test_openai_stream_keeps_usage_and_requests_it() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["stream_options"] == {"include_usage": True}
+        lines = "\n".join(
+            [
+                'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+                'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1}}',
+                "data: [DONE]",
+            ]
+        )
+        return httpx.Response(200, text=lines)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OpenAIProvider(api_key="sk", base_url="https://api.openai.test/v1", client=http)
+        request = ProviderRequest(model="gpt", messages=(Message("user", "hi"),), temperature=0, max_tokens=8)
+        events = [event async for event in client.stream(request, timeout=1)]
+    assert events[0].text == "Hi"
+    assert events[0].usage is None
+    assert events[1].text == ""
+    assert events[1].usage == Usage(4, 1)
+
+    def bad_usage(_request: httpx.Request) -> httpx.Response:
+        line = 'data: {"choices":[],"usage":{"prompt_tokens":"x","completion_tokens":1}}\n'
+        return httpx.Response(200, text=line)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(bad_usage)) as http:
+        client = OpenAIProvider(api_key="sk", base_url="https://api.openai.test/v1", client=http)
+        with pytest.raises(ProviderError):
+            async for _event in client.stream(request, timeout=1):
+                pass
 
     missing = OpenAIProvider(api_key="")
     with pytest.raises(ProviderError):

@@ -183,6 +183,7 @@ def test_schema_validation_branches() -> None:
         "$",
     )
     assert any(item.startswith("missing_required") for item in bad)
+    assert "type_mismatch:$.n" in bad
     assert validate_instance("nope", {"type": "object"}, "$") == ["type_mismatch:$"]
     assert validate_instance("abcd", {"type": "string", "minLength": 1, "maxLength": 2}, "$")
     assert validate_instance(9, {"type": "number", "minimum": 0, "maximum": 1}, "$")
@@ -207,6 +208,28 @@ def test_grounding_scores() -> None:
     assert numbered.score < 0.5
     assert sentences("") == []
     assert "percent" not in content_tokens("123 please")
+    context = "The platinum APR is 2.9 percent."
+    mixed = grounding_report(
+        "I don't know based on the provided context. The CEO lives in Atlantis.",
+        context,
+    )
+    assert mixed.reasons[0].startswith("ungrounded_sentence_count:")
+    assert mixed.score < 0.45
+    buried = grounding_report("I don't know why the CEO lives in Atlantis.", context)
+    assert buried.reasons != ("abstained",)
+    assert buried.score < 0.45
+    settings = load_settings()
+    pipeline = GuardrailPipeline(
+        settings,
+        TopicsStage.from_packs(settings.policy_packs),
+        InjectionStage(None, 0.5),
+    )
+    blocked = pipeline.run_output(
+        "I don't know based on the provided context. The CEO lives in Atlantis.",
+        GuardContext(tenant=_tenant(), direction="output", context=context, response_format=None),
+    )
+    assert blocked.blocked is True
+    assert blocked.stage == "grounding"
 
 
 def test_pipeline_overrides(tmp_path: Path) -> None:

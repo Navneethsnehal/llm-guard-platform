@@ -51,6 +51,10 @@ def test_token_bucket_refill_and_clock_rewind() -> None:
     assert zero.try_consume(1) is True
     assert zero.retry_after(1) == 60.0
     assert zero.retry_after(0) == 0.0
+    capped = TokenBucket(rate=0, capacity=1)
+    assert capped.try_consume(1.5) is False
+    assert capped.level == 1
+    assert capped.try_consume(1) is True
 
 
 def test_rate_limiter_unknown_tenant_and_limit() -> None:
@@ -111,6 +115,15 @@ def test_budget_reserve_commit_and_release() -> None:
     assert ledger.inflight_micro("acme") == 0
     clock.now += 86_400
     assert ledger.spent_micro("acme") == 0
+    exact = BudgetLedger(clock=Clock(1_700_000_000))
+    held = exact.reserve("acme", 10, cap_micro=10)
+    with pytest.raises(BudgetExceededError):
+        exact.reserve("acme", 1, cap_micro=10)
+    exact.commit(held, 10)
+    assert exact.spent_micro("acme") == 10
+    assert exact.inflight_micro("acme") == 0
+    with pytest.raises(BudgetExceededError):
+        exact.reserve("acme", 1, cap_micro=10)
 
 
 def test_cost_helpers() -> None:

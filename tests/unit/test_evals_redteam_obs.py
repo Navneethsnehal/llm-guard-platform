@@ -7,7 +7,15 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_guard.dashboard import block_counts, category_rows, gate_rows, headline, request_rows
+from llm_guard.dashboard import (
+    block_counts,
+    cache_rows,
+    category_rows,
+    circuit_rows,
+    gate_rows,
+    headline,
+    request_rows,
+)
 from llm_guard.evals import (
     CaseScore,
     GateConfig,
@@ -104,6 +112,17 @@ def test_attack_scoring_and_catalog() -> None:
     assert attack_succeeded(benign, 200, "ok") is False
     plain = AttackCase("e", "other", (Message("user", "x"),), False, False)
     assert attack_succeeded(plain, 200, "fine") is False
+    short = json.dumps(
+        {
+            "id": "chatcmpl_" + ("a" * 40),
+            "object": "chat.completion",
+            "choices": [{"message": {"content": "No."}}],
+        }
+    )
+    assert len(short) > 80
+    assert attack_succeeded(policy, 200, short) is False
+    long = json.dumps({"choices": [{"message": {"content": "x" * 90}}]})
+    assert attack_succeeded(policy, 200, long) is True
     full = catalog(smoke=False)
     smoke = catalog(smoke=True)
     assert len(smoke) < len(full)
@@ -180,6 +199,11 @@ def test_dashboard_summaries() -> None:
     }
     assert request_rows(snapshot)[0]["count"] == 3
     assert request_rows({}) == []
+    assert cache_rows(snapshot) == [{"result": "hit", "count": 2}]
+    assert cache_rows({}) == []
+    assert cache_rows({"cache": "nope"}) == []
+    assert circuit_rows(snapshot) == [{"model": "fake-fast", "state": "closed"}]
+    assert circuit_rows({"circuits": []}) == []
     assert block_counts(snapshot["audit"]) == [{"stage": "injection", "blocks": 1}]
     redteam = {
         "attack_success_rate": 0.0,
@@ -195,6 +219,9 @@ def test_dashboard_summaries() -> None:
     summary = headline(snapshot, redteam, gate)
     assert summary["requests"] == 4
     assert summary["blocked"] == 1
+    mixed = headline({"requests": {"ok": 1, "content_filter": 4, "guardrail_blocked": 2}}, None, None)
+    assert mixed["requests"] == 7
+    assert mixed["blocked"] == 2
     assert summary["gate"] == "pass"
     assert category_rows(redteam)[0]["category"] == "jailbreak"
     assert gate_rows(gate)[0]["metric"] == "quality"

@@ -1,5 +1,6 @@
 """OpenAI-compatible gateway behavior through the ASGI app."""
 
+import asyncio
 import json
 
 import httpx
@@ -11,7 +12,7 @@ from llm_guard.auth import hash_api_key
 from llm_guard.config import ApiKeyRecord, ModelConfig, TenantConfig
 from llm_guard.errors import ProviderError
 from llm_guard.providers import ChatProvider
-from llm_guard.types import ProviderEvent, ProviderRequest, ProviderResponse, usage_for
+from llm_guard.types import CompletionRequest, Message, ProviderEvent, ProviderRequest, ProviderResponse, usage_for
 
 
 def _body(user: str, model: str = "quality", **extra: object) -> dict[str, object]:
@@ -255,6 +256,29 @@ async def test_budget_rate_and_payload(tmp_path: object) -> None:
         assert short.status_code == 402
 
 
+async def test_payload_limit_boundary(tmp_path: object) -> None:
+    from pathlib import Path
+
+    assert isinstance(tmp_path, Path)
+    settings = isolated_settings(tmp_path)
+    limited = settings.model_copy(update={"server": settings.server.model_copy(update={"max_body_chars": 20})})
+    application = create_app(limited)
+    transport = httpx.ASGITransport(app=application)
+    async with httpx.AsyncClient(transport=transport, base_url="http://llm-guard.test") as http:
+        exact = await http.post(
+            "/v1/chat/completions",
+            headers=auth(REGULATED_KEY),
+            json={"model": "cost", "messages": [{"role": "user", "content": "x" * 20}]},
+        )
+        assert exact.status_code == 200
+        over = await http.post(
+            "/v1/chat/completions",
+            headers=auth(REGULATED_KEY),
+            json={"model": "cost", "messages": [{"role": "user", "content": "x" * 21}]},
+        )
+        assert over.status_code == 413
+
+
 async def test_rate_limit_separate_app(tmp_path: object) -> None:
     from pathlib import Path
 
@@ -413,6 +437,80 @@ async def test_redis_runtime_and_low_threshold(tmp_path: object, monkeypatch: py
     runtime.redis._redis.values["llm-guard:semcache:probe"] = 5  # type: ignore[attr-defined]
     assert await runtime.redis.get("llm-guard:semcache:probe") is None
     assert await runtime.redis.get("missing") is None
+
+
+async def test_abandoned_incremental_stream_is_not_a_provider_failure(
+    client: tuple[httpx.AsyncClient, object],
+) -> None:
+    _http, application = client
+    runtime = application.state.runtime
+    breaker = runtime.router.breakers["fake-fast"]
+    settled = asyncio.Event()
+    original_fail = breaker.record_failure
+    original_ok = breaker.record_success
+
+    def record_failure() -> None:
+        original_fail()
+        settled.set()
+
+    def record_success() -> None:
+        original_ok()
+        settled.set()
+
+    breaker.record_failure = record_failure  # type: ignore[method-assign]
+    breaker.record_success = record_success  # type: ignore[method-assign]
+    tenant = runtime.tenants.authenticate(LATENCY_KEY)
+    _headers, body = await runtime.gateway.stream(
+        tenant,
+        CompletionRequest(
+            model="latency",
+            messages=(
+                Message("system", "The platinum card APR is 2.9 percent for the first twelve months."),
+                Message("user", "What is the platinum card APR for the first twelve months?"),
+            ),
+            stream=True,
+        ),
+    )
+    iterator = body.__aiter__()
+    await iterator.__anext__()
+    await iterator.aclose()
+    await asyncio.wait_for(settled.wait(), timeout=1)
+    assert breaker._failures == 0
+    assert breaker.state == "closed"
+    assert runtime.gateway.budget.inflight_micro("latency-demo") == 0
+    assert runtime.metrics.counts()["requests"] == {"cancelled": 1}
+
+
+async def test_blocked_output_releases_the_reservation(client: tuple[httpx.AsyncClient, object]) -> None:
+    http, application = client
+    blocked = await http.post(
+        "/v1/chat/completions",
+        headers=auth(REGULATED_KEY),
+        json=_body("What is the platinum card APR?", model="fake-ungrounded"),
+    )
+    assert blocked.status_code == 400
+    budget = application.state.runtime.gateway.budget
+    assert budget.inflight_micro("regulated-demo") == 0
+    assert budget.spent_micro("regulated-demo") == 0
+    allowed = await http.post(
+        "/v1/chat/completions",
+        headers=auth(REGULATED_KEY),
+        json=_body("What is the platinum card APR?"),
+    )
+    assert allowed.status_code == 200
+    assert budget.spent_micro("regulated-demo") > 0
+    assert budget.inflight_micro("regulated-demo") == 0
+
+
+async def test_direct_model_uses_the_rest_of_its_route(client: tuple[httpx.AsyncClient, object]) -> None:
+    http, _application = client
+    response = await http.post(
+        "/v1/chat/completions",
+        headers=auth(REGULATED_KEY),
+        json=_body("What is the platinum card APR?", model="fake-unstable"),
+    )
+    assert response.status_code == 200
+    assert response.headers["x-llm-guard-model"] == "fake-fast"
 
 
 async def test_provider_failure_before_stream_bytes(client: tuple[httpx.AsyncClient, object]) -> None:
